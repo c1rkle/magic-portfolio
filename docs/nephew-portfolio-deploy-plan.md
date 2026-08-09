@@ -1406,3 +1406,441 @@ gcloud iam service-accounts keys delete <KEY_ID> --iam-account=$SA_EMAIL
 - Google 관리형 SSL 인증서: https://cloud.google.com/load-balancing/docs/ssl-certificates/google-managed-certs
 - Cloud DNS 빠른 시작: https://cloud.google.com/dns/docs/quickstart
 - google-github-actions/auth: https://github.com/google-github-actions/auth
+
+---
+
+# 진행 순서
+
+> 위 본문(§0~§16)은 각 단계의 상세 설명이고, 이 절은 실제로 진행할 순서만 정리한 것이야.
+> 최종적으로는 이 「진행 순서」만 남기고 위 본문은 삭제할 예정이라, 각 항목은 본문 없이도 그대로 따라 할 수 있게 작성한다.
+
+## 1. 개발 환경 구성 (`C:\recruit`)
+
+조카 PC(Windows)에 개발 환경을 구축한다. 이후 모든 작업은 `C:\recruit` 폴더 아래에서 진행한다.
+
+> **설치 목록**: Windows Terminal → Git → Node.js → Python → Java(JDK) → VS Code → Claude Code → WSL2 → Docker Desktop → Google Cloud SDK
+>
+> Python과 Java는 이 포트폴리오 사이트(Next.js) 구동에 필요하진 않지만, **개발자로서의 기본 환경**이라 함께 설치한다. 시간이 부족하면 Python·Java는 뒤로 미뤄도 나머지 작업에 지장은 없다.
+
+⚠️ **이 장 전체를 관통하는 원칙**: **프로그램을 설치할 때마다 터미널을 닫았다가 새로 열 것.** PATH 환경변수가 갱신되지 않아 "명령을 찾을 수 없습니다"가 뜨는 것이 이 단계 사고의 90%다.
+
+### 1-1. 작업 폴더 만들기
+
+`Win + X` → **터미널(관리자)** 실행 후:
+
+```powershell
+New-Item -ItemType Directory -Force -Path "C:\recruit"
+Set-Location "C:\recruit"
+```
+
+⚠️ **`C:\` 바로 아래에 폴더를 만들려면 관리자 권한이 필요해.** 일반 권한 PowerShell에서 실행하면 "액세스가 거부되었습니다"가 뜬다. 관리자 터미널에서 한 번만 만들어두면 이후 작업은 일반 권한으로 해도 된다.
+
+만든 뒤 폴더 구조는 이렇게 갈 예정이야:
+
+```
+C:\recruit\
+  ├─ portfolio\        ← 포트폴리오 소스코드 (5번에서 생성)
+  └─ set-vars.ps1      ← GCP 작업용 변수 파일 (6번에서 생성)
+```
+
+### 1-2. PowerShell 실행 정책 풀기
+
+이후 `.ps1` 스크립트와 Claude Code 설치 스크립트를 실행해야 하는데, Windows 기본 설정에서는 차단된다. 한 번만 풀어주면 된다.
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+```
+
+`Y` 입력 후 엔터.
+
+### 1-3. winget 확인
+
+Windows 10 1809 이상이면 기본 설치돼 있다.
+
+```powershell
+winget --version
+```
+
+버전이 안 나오면 Microsoft Store에서 **"앱 설치 관리자"**를 설치하면 된다.
+
+> ⚠️ **winget 패키지 ID는 시간이 지나면서 바뀔 수 있어.** 아래 명령이 "패키지를 찾을 수 없습니다"로 실패하면 `winget search <이름>` 으로 정확한 ID를 확인한 뒤 그 ID로 설치할 것. (예: `winget search python`, `winget search openjdk`)
+
+### 1-4. 기본 도구 설치
+
+**[관리자] PowerShell**에서 순서대로:
+
+```powershell
+# 터미널 (선택이지만 권장 — 복사·붙여넣기와 탭 관리가 훨씬 편함)
+winget install --id Microsoft.WindowsTerminal -e
+
+# Git
+winget install --id Git.Git -e
+
+# Node.js LTS
+winget install --id OpenJS.NodeJS.LTS -e
+
+# VS Code
+winget install --id Microsoft.VisualStudioCode -e
+```
+
+**터미널을 닫고 새로 열어서** 확인:
+
+```powershell
+git --version     # git version 2.4x.x
+node -v           # v22.x.x 이상
+npm -v            # 10.x.x 이상
+code --version
+```
+
+> Magic Portfolio의 최소 요구는 Node 18.17+ 이지만, Node 20은 2026년 4월에 지원이 끝났어. **LTS(22.x 이상)** 로 간다.
+
+### 1-5. Git 최초 설정 ⚠️ 개행 설정 주의
+
+```powershell
+git config --global user.name "홍길동"
+git config --global user.email "취업용Gmail주소@gmail.com"
+git config --global init.defaultBranch main
+git config --global core.autocrlf input
+```
+
+⚠️ **`core.autocrlf input`이 핵심이야.** Windows Git은 기본적으로 파일 개행을 CRLF로 바꿔 저장하는데, 리눅스 서버에서 실행될 셸 스크립트(`.sh`)나 Dockerfile에 CRLF가 들어가면 **`$'\r': command not found` 에러로 배포가 통째로 실패해.**
+
+설정 확인:
+
+```powershell
+git config --global --list
+```
+
+> `user.email`은 2번에서 만들 취업용 Gmail 주소로 넣는다. 아직 계정이 없으면 2번을 먼저 하고 돌아와도 된다.
+
+### 1-6. Python 개발 환경
+
+```powershell
+winget install --id Python.Python.3.13 -e
+```
+
+> ⚠️ 위 ID가 실패하면 `winget search Python.Python.3` 로 설치 가능한 최신 3.x 버전을 확인해서 그 ID를 쓸 것.
+
+터미널 새로 열고 확인:
+
+```powershell
+python --version
+pip --version
+```
+
+⚠️ **`python`을 쳤을 때 Microsoft Store가 열리면** Windows 기본 앱 별칭이 실제 Python을 가리고 있는 것이다.
+**설정 → 앱 → 고급 앱 설정 → 앱 실행 별칭**에서 `python.exe`, `python3.exe` 항목을 **끄면** 해결된다.
+
+프로젝트별 가상환경 사용법(파이썬 작업할 때 습관화할 것):
+
+```powershell
+python -m venv .venv           # 가상환경 생성
+.\.venv\Scripts\Activate.ps1   # 활성화 (프롬프트 앞에 (.venv) 표시됨)
+pip install <패키지>
+deactivate                     # 비활성화
+```
+
+VS Code 확장: **Python** (Microsoft 제공) 설치.
+
+### 1-7. Java 개발 환경
+
+```powershell
+winget install --id Microsoft.OpenJDK.21 -e
+```
+
+> ⚠️ 위 ID가 실패하거나 더 최신 LTS를 원하면 `winget search openjdk` 또는 `winget search Temurin` 으로 확인할 것.
+> 대안: `winget install --id EclipseAdoptium.Temurin.21.JDK -e`
+
+터미널 새로 열고 확인:
+
+```powershell
+java -version
+javac -version     # JDK가 맞게 깔렸는지 확인 (JRE만 깔리면 javac이 없음)
+```
+
+`JAVA_HOME` 확인 (일부 빌드 도구가 이 값을 참조한다):
+
+```powershell
+$env:JAVA_HOME
+```
+
+비어 있으면 **[관리자]** PowerShell에서 설정 (경로는 실제 설치 경로로 교체):
+
+```powershell
+[Environment]::SetEnvironmentVariable("JAVA_HOME", "C:\Program Files\Microsoft\jdk-21.0.x", "Machine")
+```
+
+VS Code 확장: **Extension Pack for Java** (Microsoft 제공) 설치.
+
+### 1-8. WSL2 설치 (Docker Desktop 전제 조건)
+
+**[관리자]** PowerShell에서:
+
+```powershell
+wsl --install
+```
+
+⚠️ 설치 후 **반드시 재부팅.** 재부팅하면 Ubuntu 초기 설정 창이 뜨는데, 사용자명·비밀번호를 만들어두면 된다 (이 계정은 이번 작업에서 직접 쓰진 않는다).
+
+재부팅 후 확인:
+
+```powershell
+wsl --status
+# 기본 버전: 2  로 나오면 성공
+```
+
+> 안 될 경우: BIOS에서 가상화(Virtualization / Intel VT-x / AMD-V / SVM)가 꺼져 있을 수 있다. 제조사별 BIOS 진입키가 다르다(보통 F2/F10/Del). "가상화" 항목을 Enabled로 바꾸면 된다.
+
+### 1-9. Docker Desktop 설치
+
+```powershell
+winget install --id Docker.DockerDesktop -e
+```
+
+설치 후:
+
+1. **재부팅**
+2. 시작 메뉴에서 **Docker Desktop** 실행
+3. 약관 동의 → 로그인은 건너뛰어도 됨(Skip)
+4. 우측 하단 트레이의 고래 아이콘이 **멈추면** 준비 완료 (움직이면 아직 시작 중)
+
+확인:
+
+```powershell
+docker --version
+docker run --rm hello-world
+# "Hello from Docker!" 가 나오면 성공
+```
+
+⚠️ **Docker Desktop이 실행 중이어야 `docker` 명령이 동작해.** PC를 껐다 켠 뒤에는 Docker Desktop을 먼저 실행하고 작업할 것.
+
+### 1-10. Google Cloud SDK(gcloud CLI) 설치
+
+```powershell
+winget install --id Google.CloudSDK -e
+```
+
+터미널 새로 열고 확인:
+
+```powershell
+gcloud --version
+```
+
+⚠️ winget 설치가 실패하거나 명령을 못 찾으면 설치 파일로 하면 된다:
+https://dl.google.com/dl/cloudsdk/channels/rapid/GoogleCloudSDKInstaller.exe
+→ 실행 → "Bundled Python" 체크 유지 → 설치 → 터미널 재시작
+
+> **로그인(`gcloud auth login`)과 프로젝트 설정은 4번(GCP 가입) 이후에 한다.** 여기서는 설치와 버전 확인까지만.
+
+### 1-11. VS Code + Claude Code 세팅
+
+**(1) Claude Code 설치**
+
+PowerShell에서 (1-2의 실행 정책을 먼저 풀어둬야 한다):
+
+```powershell
+irm https://claude.ai/install.ps1 | iex
+```
+
+또는 npm으로 (Node.js가 이미 깔려 있으므로 이쪽도 가능):
+
+```powershell
+npm install -g @anthropic-ai/claude-code
+```
+
+터미널 새로 열고 확인:
+
+```powershell
+claude --version
+```
+
+**(2) VS Code 확장 설치**
+
+- VS Code 좌측 **확장(Extensions)** 아이콘 → `Claude Code` 검색 → 설치
+- 또는 VS Code 통합 터미널(`Ctrl + \``)에서 `claude` 를 실행하면 확장 설치를 안내해준다
+
+**(3) 로그인**
+
+터미널에서 `claude` 실행 후 `/login` 입력 → 브라우저가 열리면 계정 인증.
+
+⚠️ **Claude Code는 유료 구독(Claude Pro/Max) 또는 Anthropic Console의 API 크레딧이 있어야 사용할 수 있어.** 무료 계정으로는 동작하지 않는다. 취업 준비 기간 동안만 쓸 거라면 구독 비용을 미리 확인하고 결정할 것. **없어도 이 문서의 나머지 작업은 전부 진행 가능하다.**
+
+**(4) 그 외 권장 VS Code 확장**
+
+| 확장 | 용도 |
+|---|---|
+| **MDX** | 포트폴리오 콘텐츠(`.mdx`) 편집 |
+| **Docker** | Dockerfile 문법 강조·컨테이너 관리 |
+| **ESLint** | 코드 검사 |
+| **Python** | 파이썬 (1-6) |
+| **Extension Pack for Java** | 자바 (1-7) |
+
+### 1-12. Magic Portfolio 로컬 실행 확인 ⚠️
+
+환경이 제대로 갖춰졌는지 실제로 돌려서 확인한다. **여기가 이 장의 진짜 완료 조건이야.**
+
+```powershell
+Set-Location "C:\recruit"
+git clone --depth 1 https://github.com/once-ui-system/magic-portfolio.git portfolio
+Set-Location portfolio
+Remove-Item -Recurse -Force .git
+npm install
+npm run dev
+```
+
+브라우저에서 http://localhost:3000 접속 → 포트폴리오 화면이 나오면 성공. 확인했으면 터미널에서 `Ctrl + C`로 종료.
+
+> `Remove-Item -Recurse -Force .git` 은 원본 템플릿의 깃 히스토리를 지우는 것이다. 5번에서 조카 계정의 새 리포지토리로 다시 초기화한다.
+> `npm install`에서 에러가 나면 `node -v` 로 Node 버전부터 확인할 것.
+
+### [확인] 1번 완료 조건
+
+아래를 한 번에 실행해서 전부 버전이 출력되면 통과:
+
+```powershell
+Write-Host "=== 설치 확인 ===" -ForegroundColor Cyan
+git --version
+node -v
+npm -v
+python --version
+java -version
+docker --version
+gcloud --version
+claude --version
+wsl --status
+```
+
+- [ ] `C:\recruit` 폴더 생성됨
+- [ ] git, node, npm, python, java, docker, gcloud 전부 버전 출력됨
+- [ ] `git config --global core.autocrlf` 값이 `input`
+- [ ] `docker run --rm hello-world` 성공
+- [ ] VS Code에 Claude Code 확장 설치 + 로그인 완료 (구독이 있는 경우)
+- [ ] `npm run dev` 로 localhost:3000에 포트폴리오 화면이 정상 표시됨
+
+## 2. 조카 Gmail 계정으로 GitHub 계정 만들기
+
+조카의 Gmail 계정으로 GitHub 계정을 생성한다.
+
+**이미 GitHub 계정이 있는 경우** — 그대로 사용해도 되지만, 아래를 권고한다.
+
+- **취업 준비용 Gmail 계정을 새로 하나 만들 것.** 취업과 관련된 모든 사항(GitHub, GCP, 도메인, 채용 사이트, 기업 지원 메일)을 이 하나의 계정으로 통일하기 위해서야.
+- **그 Gmail 계정으로 GitHub 계정까지 새로 만들 것.** 기존 계정을 이메일만 바꿔 쓰는 것보다, 취업용 계정을 분리해두는 편이 관리와 인수인계 모두 깔끔해.
+
+**이렇게 통일하는 이유**
+
+- 계정이 흩어져 있으면 인증 메일·알림이 여러 곳으로 분산돼서 놓치기 쉬워. 특히 도메인 소유권 확인 메일(§4-2)이나 GCP 예산 알림(§5-6)은 놓치면 사고로 이어져.
+- 기존 개인 계정에는 학습용 리포지토리나 실습 커밋이 섞여 있는 경우가 많아. 채용 담당자가 보는 프로필은 정돈된 상태가 유리해.
+- 이력서에 적을 이메일 주소와 GitHub 계정 주소가 하나로 묶여서 일관성 있게 보여.
+
+관련 상세: 계정 생성은 §2-1(Google), §2-3(GitHub), 아이디 작명 주의사항은 §2-3의 ⚠️, 2단계 인증은 §2-2·§2-4, 프로필 정리는 §2-5 참고.
+
+## 3. 취업용 Gmail로 고대디 가입 후 도메인 구매
+
+2번에서 만든 취업용 Gmail 계정으로 고대디(GoDaddy)에 가입하고, 포트폴리오에서 쓸 도메인을 구매한다.
+
+### 3-1. 고대디 가입
+
+1. https://www.godaddy.com 접속 → 우측 상단 로그인 → **계정 만들기**
+2. **취업용 Gmail 주소**와 비밀번호 입력 (GCP·GitHub와 동일한 계정으로 통일)
+3. 수신함에서 이메일 인증 완료
+
+### 3-2. 도메인명 정하기 (구매 전에 먼저 결정)
+
+취업용이니까 **본인 이름 기반**이 제일 무난해.
+
+- 추천 형태: `이름성.com`, `이름-dev.com`, `이름.dev`
+- 예시: `kimminsu.com`, `minsu-kim.dev`, `minsudev.com`
+- 피할 것: 하이픈 2개 이상, 숫자 혼용, 지나치게 긴 이름
+  → 판단 기준은 **"전화로 불러줄 수 있는가"**. 면접에서 말로 알려줄 일이 실제로 생겨.
+
+| TLD | 연 비용 | 비고 |
+|---|---|---|
+| `.com` | 2만원 내외 | 가장 무난, 신뢰감 |
+| `.dev` | 2만원 내외 | 개발자 이미지. **HTTPS 강제(HSTS preload)** 라 이 구조와 잘 맞음 |
+| `.io`, `.me` | 4~6만원 | 갱신비가 비쌈. 비추 |
+
+⚠️ **1순위가 이미 팔렸을 때를 대비해 후보를 2~3개 미리 정해두면** 현장에서 고민하는 시간을 줄일 수 있어.
+
+### 3-3. 구매 절차
+
+1. 고대디 로그인 상태에서 검색창에 원하는 도메인 입력
+2. 사용 가능하면 장바구니에 담기
+3. ⚠️ **부가 옵션은 전부 해제할 것.** 여기서 안 빼면 불필요한 비용이 몇 배로 붙어:
+
+   | 옵션 | 처리 | 이유 |
+   |---|---|---|
+   | 웹 호스팅 | **해제** | GCP에 올릴 거라 불필요 |
+   | 이메일(Microsoft 365 등) | **해제** | 불필요 |
+   | SSL 인증서 | **해제** | GCP에서 무료로 자동 발급받음 (§12-7) |
+   | 개인정보 보호(WHOIS) | 무료 기본 제공이면 유지, 유료면 판단 | |
+
+4. 결제 기간은 **1년**으로 (여러 해 결제는 나중에 판단)
+5. 결제 완료
+6. ⚠️ **고대디에서 오는 "도메인 소유권 확인" 메일의 링크를 반드시 클릭할 것.**
+   미인증 상태로 15일이 지나면 도메인이 **정지**돼. 결제만 하고 넘어가는 실수가 잦은 지점이야.
+7. **자동 갱신은 켜두는 걸 권장.** 갱신을 놓치면 도메인이 풀려서 이력서에 적은 주소가 죽어.
+
+### 3-4. 구매 정보 메모
+
+```
+도메인명: ______________________
+구매일:   ______________________
+만료일:   ______________________
+자동갱신: 켬 / 끔        ← 켜두는 걸 권장
+```
+
+### [확인] 3번 완료 조건
+
+- [ ] 고대디 "내 제품"에 도메인이 보임
+- [ ] 소유권 확인 메일 인증 완료 (도메인에 경고 표시 없음)
+- [ ] 도메인명을 위 메모란에 기록함 (이후 `set-vars.ps1`의 `$DOMAIN` 값으로 씀 — §5-4)
+
+> 참고: 이 도메인은 §12-5에서 네임서버를 GCP로 위임하게 돼. 고대디에서는 도메인만 사고, DNS 관리는 Cloud DNS에서 하는 구조야.
+
+관련 상세: §4(도메인 구매), §12-5(네임서버 변경) 참고.
+
+## 4. 취업용 Gmail로 GCP Console 가입
+
+2번에서 만든 취업용 Gmail 계정으로 Google Cloud Console에 가입하고 무료 체험을 등록한다.
+
+### 4-1. 가입 전 확인
+
+- [ ] **Google 계정 2단계 인증이 켜져 있을 것** (§2-2)
+      ⚠️ **2026년 10월 20일부터 GCP 콘솔 로그인에 2단계 인증이 의무화**돼. 지금 켜두지 않으면 그 시점에 갑자기 로그인이 막혀. 백업 코드도 함께 저장해둘 것.
+- [ ] **해외 결제가 가능한 신용/체크카드** 준비 (§2-7)
+      카드사 앱에서 **해외 결제 차단이 걸려 있지 않은지** 미리 확인. 여기서 막히는 경우가 은근히 많아.
+
+### 4-2. 무료 체험 등록
+
+1. 취업용 Gmail 계정으로 https://console.cloud.google.com 접속
+2. **무료로 시작하기** 클릭
+3. 1단계: 국가 **대한민국** 선택 → 약관 동의
+4. 2단계: 계정 유형 **개인** → 이름·주소·카드 정보 입력
+5. 완료되면 콘솔 상단에 **$300 크레딧과 남은 일수**가 표시됨
+
+### 4-3. 결제 관련 주의사항 ⚠️
+
+- 카드 등록 시 **약 $1 승인 테스트**가 잡혔다가 취소돼. 실제 청구가 아니니 놀라지 않아도 돼.
+- ⚠️ **"유료 계정으로 업그레이드(Upgrade)" 버튼은 절대 누르지 말 것.** 누르는 순간 크레딧 소진과 무관하게 실제 과금이 시작돼.
+- ⚠️ **크레딧 $300은 90일 만료야.** 금액이 남아 있어도 90일이 지나면 소멸돼. 이 구조의 월 비용이 약 $39라서, **금액보다 90일 만료가 먼저 도달**해.
+  - 오늘 가입하면 만료 시점은 **2026년 11월 초**. 그때의 선택지는 §15-2 참고.
+
+### 4-4. 크레딧 만료일 메모
+
+```
+GCP 가입일:     ______________________
+크레딧 만료일:  ______________________   ← 캘린더에 알림 걸어둘 것
+```
+
+만료일은 콘솔 상단 또는 **결제 → 개요**에서 확인할 수 있어.
+
+### [확인] 4번 완료 조건
+
+- [ ] 취업용 Gmail로 GCP 콘솔 로그인됨
+- [ ] Google 계정 2단계 인증 켜짐 + 백업 코드 저장함
+- [ ] 콘솔 상단에 $300 크레딧과 남은 일수가 표시됨
+- [ ] 크레딧 만료일을 메모하고 캘린더 알림 등록함
+- [ ] "유료 계정으로 업그레이드"를 누르지 않은 상태
+
+관련 상세: §1-2(무료 크레딧의 함정), §1-3(계정·비용 명의), §2-2(2단계 인증), §2-7(결제 수단), §5-1(무료 체험 등록) 참고.
+
