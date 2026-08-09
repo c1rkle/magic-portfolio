@@ -1439,8 +1439,8 @@ Set-Location "C:\recruit"
 
 ```
 C:\recruit\
-  ├─ portfolio\        ← 포트폴리오 소스코드 (5번에서 생성)
-  └─ set-vars.ps1      ← GCP 작업용 변수 파일 (6번에서 생성)
+  ├─ portfolio\        ← 포트폴리오 소스코드 (1-12에서 생성)
+  └─ set-vars.ps1      ← GCP 작업용 변수 파일 (GCP 인프라 단계에서 생성)
 ```
 
 ### 1-2. PowerShell 실행 정책 풀기
@@ -1690,7 +1690,7 @@ npm run dev
 
 브라우저에서 http://localhost:3000 접속 → 포트폴리오 화면이 나오면 성공. 확인했으면 터미널에서 `Ctrl + C`로 종료.
 
-> `Remove-Item -Recurse -Force .git` 은 원본 템플릿의 깃 히스토리를 지우는 것이다. 5번에서 조카 계정의 새 리포지토리로 다시 초기화한다.
+> `Remove-Item -Recurse -Force .git` 은 원본 템플릿의 깃 히스토리를 지우는 것이다. **2번에서** 조카 계정의 새 리포지토리로 다시 초기화한다.
 > `npm install`에서 에러가 나면 `node -v` 로 Node 버전부터 확인할 것.
 
 ### [확인] 1번 완료 조건
@@ -1717,7 +1717,11 @@ wsl --status
 - [ ] VS Code에 Claude Code 확장 설치 + 로그인 완료 (구독이 있는 경우)
 - [ ] `npm run dev` 로 localhost:3000에 포트폴리오 화면이 정상 표시됨
 
-## 2. 조카 Gmail 계정으로 GitHub 계정 만들기
+## 2. GitHub 계정 만들고 포트폴리오 리포지토리 이관
+
+취업용 Gmail로 GitHub 계정을 만든 뒤, 원본 템플릿 리포지토리를 **조카 계정의 새 리포지토리로 이관**한다.
+
+### 2-1. 계정 만들기
 
 조카의 Gmail 계정으로 GitHub 계정을 생성한다.
 
@@ -1733,6 +1737,108 @@ wsl --status
 - 이력서에 적을 이메일 주소와 GitHub 계정 주소가 하나로 묶여서 일관성 있게 보여.
 
 관련 상세: 계정 생성은 §2-1(Google), §2-3(GitHub), 아이디 작명 주의사항은 §2-3의 ⚠️, 2단계 인증은 §2-2·§2-4, 프로필 정리는 §2-5 참고.
+
+### 2-2. 원본 리포지토리 이관 — 포크가 아니라 "새 리포"로
+
+이관 대상 원본: **https://github.com/once-ui-system/magic-portfolio**
+
+⚠️ **GitHub의 Fork 버튼을 쓰지 말 것.** 새 리포지토리로 시작하는 걸 권장한다.
+
+| | 포크(Fork) | 새 리포 (권장) |
+|---|---|---|
+| 프로필 표시 | `forked from once-ui-system/magic-portfolio` 꼬리표가 붙음 | 조카 본인의 리포로 보임 |
+| 커밋 히스토리 | 원본 커밋과 섞임 | 조카 커밋만 남음 |
+| 이력서 관점 | 남의 프로젝트를 복사한 것으로 보이기 쉬움 | 본인이 만든 프로젝트로 읽힘 |
+| 업스트림 업데이트 | `git pull`로 가져올 수 있음 | 못 가져옴 (아래 참고) |
+
+> **트레이드오프 하나**: 히스토리를 버리기 때문에 나중에 원본 템플릿이 업데이트돼도 `git pull`로 받아올 수 없다(unrelated histories). 필요해지면 `upstream` 리모트를 따로 추가해서 특정 커밋만 cherry-pick 하면 된다. 어차피 콘텐츠를 전면 교체할 거라 실질적인 제약은 아니다.
+
+**소스는 이미 준비돼 있다.** 1-12에서 `C:\recruit\portfolio`로 clone하고 `.git`을 지운 상태다. 아직 안 했으면 1-12를 먼저 하고 올 것.
+
+### 2-3. GitHub에 빈 리포지토리 만들기
+
+1. https://github.com/new 접속
+2. **Repository name**: `portfolio`
+3. **Public** 선택
+   → 이력서에 리포 주소를 같이 적을 수 있어서 권장. 코드를 보여주는 것 자체가 포트폴리오다.
+4. ⚠️ **"Add a README file", "Add .gitignore", "Choose a license" 세 개는 전부 체크 해제.**
+   로컬에 이미 같은 파일들이 있어서, 체크하면 첫 푸시에서 충돌이 난다.
+5. **Create repository** 클릭
+6. 다음 화면에 나오는 리포 주소(`https://github.com/조카아이디/portfolio.git`)를 메모
+
+### 2-4. 로컬 소스를 새 리포지토리로 푸시
+
+```powershell
+Set-Location "C:\recruit\portfolio"
+
+# 혹시 .git이 남아 있으면 제거 (1-12에서 이미 지웠다면 아무 일도 안 일어남)
+if (Test-Path .git) { Remove-Item -Recurse -Force .git }
+
+git init -b main
+git add .
+git commit -m "chore: initialize portfolio from Magic Portfolio template"
+git remote add origin https://github.com/조카아이디/portfolio.git
+git push -u origin main
+```
+
+⚠️ **첫 푸시 때 Git Credential Manager 창이 뜨면서 브라우저 로그인**을 요구한다. 2-1에서 만든 GitHub 계정으로 로그인하면 이후로는 자동 인증된다.
+
+확인:
+
+```powershell
+git remote -v          # origin이 조카 리포 주소로 나오는지
+git log --oneline -1   # 커밋 1개가 보이는지
+git status -sb         # "## main...origin/main" — 동기화 상태
+```
+
+브라우저에서 `https://github.com/조카아이디/portfolio` 에 들어가 파일이 올라와 있는지도 눈으로 확인할 것.
+
+> ⚠️ **`git push`가 인증 오류로 막히면** GitHub는 2021년부터 비밀번호 인증을 막았다. Credential Manager 창의 브라우저 로그인을 쓰거나, 그래도 안 되면 **Settings → Developer settings → Personal access tokens**에서 토큰을 발급받아 비밀번호 자리에 넣으면 된다.
+
+### 2-5. 라이선스 의무 — 출처 표기 ⚠️
+
+Magic Portfolio는 **CC BY-NC 4.0** 라이선스다.
+
+- **비상업적 사용만 허용** → 개인 취업용 포트폴리오는 해당됨. 문제 없음.
+- **출처 표기(Attribution) 필수** → 푸터의 **Once UI 크레딧을 지우면 안 된다.**
+- 상업적 이용(외주 제작, 회사 홍보 등)을 하려면 Once UI Pro 라이선스를 별도로 구매해야 한다.
+
+`README.md` 최상단에 아래 한 줄을 추가한다:
+
+```markdown
+Based on [Magic Portfolio](https://github.com/once-ui-system/magic-portfolio) by Once UI (CC BY-NC 4.0).
+```
+
+`LICENSE` 파일은 **삭제하지 말고 그대로 둘 것.**
+
+커밋:
+
+```powershell
+git add README.md
+git commit -m "docs: credit Magic Portfolio template"
+git push
+```
+
+> **이력서에는 정직하게 쓰는 게 유리하다.** "Once UI Magic Portfolio 템플릿 기반으로 커스터마이징 및 GCP 인프라 구축"이라고 적으면, 면접에서 오히려 인프라 역량으로 어필된다. 템플릿을 감추려다 들키는 게 훨씬 손해다.
+
+### 2-6. GitHub 프로필 정리
+
+https://github.com/settings/profile 에서:
+
+- **프로필 사진 등록** (기본 아이콘이면 성의 없어 보인다)
+- **이름(본명), 한 줄 소개, 위치** 입력
+- **Website 칸**은 3번에서 도메인을 사고 배포까지 끝난 뒤에 등록한다
+
+### [확인] 2번 완료 조건
+
+- [ ] 취업용 Gmail로 GitHub 계정 생성됨
+- [ ] GitHub 2FA 켜짐 + 복구 코드 저장함
+- [ ] `github.com/조카아이디/portfolio` 리포지토리가 Public으로 생성됨
+- [ ] 로컬 `C:\recruit\portfolio`가 그 리포로 푸시됨 (`git status -sb`가 `## main...origin/main`)
+- [ ] 브라우저에서 리포에 파일이 보이고, **"forked from" 꼬리표가 없음**
+- [ ] README 최상단에 출처 표기 추가 + 푸시됨
+- [ ] `LICENSE` 파일이 그대로 남아 있음
+- [ ] GitHub 프로필에 사진·이름·소개 입력됨
 
 ## 3. 취업용 Gmail로 고대디 가입 후 도메인 구매
 
