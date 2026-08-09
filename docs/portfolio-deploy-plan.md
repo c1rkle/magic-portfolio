@@ -2228,3 +2228,288 @@ GitHub Secret의 `GCP_SA_KEY` 도 삭제한다.
 **GitHub Actions**
 - google-github-actions/auth: https://github.com/google-github-actions/auth
 - Workload Identity Federation 가이드: https://github.com/google-github-actions/auth#preferred-direct-workload-identity-federation
+
+---
+
+## 부록 E. 같은 GCE에 두 번째 앱 올리기 — `gym-log`
+
+인턴 기간에 만든 개인 프로젝트 **`gym-log`**(매일의 운동 기록 앱, 프론트·백엔드 모두 TypeScript, Node 서버에서 실행)를 **이미 구축한 인프라에 그대로 얹는다.** VM·로드밸런서·인증서를 새로 만들지 않고, **서브도메인과 포트만 달리해서** 같은 서버에서 함께 돌린다.
+
+포트폴리오에 "직접 만든 앱"이 실제 도메인으로 살아 있으면 설득력이 크게 올라간다. 12-2의 프로젝트 항목에 이 앱을 등록하고 링크를 걸어두면 좋다.
+
+### E-1. 구성 개요
+
+```
+                     [Global HTTPS LB]  (기존 것 그대로)
+                       │  인증서 2장 (SNI)
+        ┌──────────────┴───────────────┐
+   Host: 내도메인.com            Host: gym.내도메인.com
+   Host: www.내도메인.com               │
+        │                              │
+   [portfolio-backend]           [gymlog-backend]   ← 새로 만듦
+   named port http:3000          named port gym:3001
+        └──────────────┬───────────────┘
+                       ▼
+              [GCE VM  portfolio-vm]   (기존 VM 1대 그대로)
+                 ├─ docker: portfolio  :3000
+                 └─ docker: gymlog     :3001   ← 새로 띄움
+```
+
+**새로 만드는 것**: 서브도메인 A 레코드 / 방화벽 3001 / named port / 헬스체크 / 백엔드 서비스 / URL 맵 호스트 규칙 / SSL 인증서 1장 / GitHub 리포 + 워크플로우
+**그대로 쓰는 것**: VM, 고정 IP, 로드밸런서, Artifact Registry, 서비스 계정
+
+아래 명령은 전부 `. C:\recruit\set-vars.ps1` 을 먼저 실행한 상태에서 진행한다. 서브도메인은 `gym` 으로 가정한다.
+
+```powershell
+. C:\recruit\set-vars.ps1
+$SUB = "gym"          # 서브도메인 이름
+$GYM_PORT = 3001      # 포트 (포트폴리오의 3000과 겹치지 않게)
+```
+
+### E-2. gym-log 소스 준비
+
+조카의 GitHub 계정에 `gym-log` 리포지토리를 만들고 소스를 올린다(2-6·2-7과 동일한 방식). 그 다음 컨테이너화한다.
+
+**`Dockerfile`** (프로젝트 루트) — 프론트를 빌드해 Node 서버가 정적 파일까지 함께 서빙하는 **단일 컨테이너** 구성:
+
+```dockerfile
+FROM node:22-alpine AS build
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npm run build          # 프론트 + 백엔드 TypeScript 빌드
+
+FROM node:22-alpine AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+ENV PORT=3001
+COPY package*.json ./
+RUN npm ci --omit=dev
+COPY --from=build /app/dist ./dist
+EXPOSE 3001
+CMD ["node", "dist/server.js"]
+```
+
+⚠️ **프로젝트 구조에 맞게 조정할 것.** 빌드 산출물 경로(`dist`), 진입점(`dist/server.js`), 빌드 스크립트 이름은 실제 `package.json` 에 맞춰야 한다. 프론트·백엔드가 별도 폴더(모노레포)면 각각 빌드해서 서버가 프론트 산출물을 `express.static` 으로 서빙하게 만든다.
+
+⚠️ **서버가 `0.0.0.0` 에 바인딩해야 한다.** `localhost`로 열면 컨테이너 밖에서 접속되지 않아 헬스체크가 실패한다.
+
+```ts
+app.listen(Number(process.env.PORT) || 3001, "0.0.0.0");
+```
+
+**로컬 검증** (9-4와 같은 이유로 반드시 통과하고 넘어갈 것):
+
+```powershell
+docker build -t gymlog:local .
+docker run --rm -p 3001:3001 gymlog:local
+# http://localhost:3001 접속 확인
+```
+
+`.dockerignore` 도 9-3을 참고해 만든다.
+
+### E-3. 서브도메인 A 레코드 추가
+
+기존 Cloud DNS 영역에 레코드만 하나 더 넣는다. **IP는 기존 로드밸런서 것과 동일하다.**
+
+```powershell
+$LB_IP = gcloud compute addresses describe portfolio-ip --global --format="value(address)"
+
+gcloud dns record-sets create "$SUB.$DOMAIN." `
+  --zone=portfolio-zone --type=A --ttl=300 --rrdatas=$LB_IP
+```
+
+전파 확인 (E-6의 인증서 발급 전에 반드시 통과해야 한다):
+
+```powershell
+Resolve-DnsName "$SUB.$DOMAIN" -Type A -Server 8.8.8.8
+```
+
+> 네임서버 위임은 이미 끝나 있으므로 이번엔 보통 몇 분 안에 반영된다.
+
+### E-4. 방화벽에 3001 포트 열기
+
+```powershell
+gcloud compute firewall-rules create allow-lb-to-gymlog `
+  --allow=tcp:$GYM_PORT `
+  --source-ranges=130.211.0.0/22,35.191.0.0/16 `
+  --target-tags=portfolio-web `
+  --description="Allow GCLB to gym-log"
+```
+
+### E-5. 인스턴스 그룹에 named port 추가 ⚠️
+
+```powershell
+gcloud compute instance-groups unmanaged set-named-ports portfolio-ig `
+  --zone=$ZONE --named-ports=http:3000,gym:3001
+```
+
+⚠️ **`set-named-ports` 는 기존 목록을 통째로 덮어쓴다.** `gym:3001` 만 지정하면 포트폴리오의 `http:3000` 이 지워져서 **기존 사이트가 죽는다.** 위처럼 **둘 다** 나열할 것.
+
+확인:
+
+```powershell
+gcloud compute instance-groups unmanaged describe portfolio-ig --zone=$ZONE --format="value(namedPorts)"
+```
+
+### E-6. 헬스체크 + 백엔드 서비스 생성
+
+```powershell
+gcloud compute health-checks create http gymlog-hc `
+  --port=$GYM_PORT --request-path=/ `
+  --check-interval=15s --timeout=5s --healthy-threshold=2 --unhealthy-threshold=3
+
+gcloud compute backend-services create gymlog-backend `
+  --protocol=HTTP --port-name=gym --health-checks=gymlog-hc --global --enable-cdn
+
+gcloud compute backend-services add-backend gymlog-backend `
+  --instance-group=portfolio-ig --instance-group-zone=$ZONE --global
+```
+
+> `--port-name=gym` 이 E-5의 named port 이름과 일치해야 한다.
+> 헬스체크 경로 `/` 가 200을 주지 않는다면(예: 로그인 리다이렉트) `--request-path=/health` 같은 전용 엔드포인트를 앱에 만들어 두는 편이 낫다.
+
+### E-7. URL 맵에 호스트 규칙 추가
+
+같은 로드밸런서가 호스트 이름을 보고 백엔드를 갈라 보내게 한다.
+
+```powershell
+gcloud compute url-maps add-path-matcher portfolio-urlmap `
+  --path-matcher-name=gym-matcher `
+  --default-service=gymlog-backend `
+  --new-hosts="$SUB.$DOMAIN"
+```
+
+기본(`내도메인.com`, `www.내도메인.com`)은 계속 `portfolio-backend` 로 가고, `gym.내도메인.com` 만 새 백엔드로 간다.
+
+확인:
+
+```powershell
+gcloud compute url-maps describe portfolio-urlmap
+```
+
+### E-8. SSL 인증서 추가 (기존 인증서는 건드리지 않는다)
+
+⚠️ **Google 관리형 인증서는 발급 후 도메인 목록을 수정할 수 없다.** 기존 인증서를 지우고 다시 만들면 재발급되는 동안 **포트폴리오 사이트의 HTTPS가 끊긴다.**
+
+대신 **서브도메인 전용 인증서를 새로 만들어 프록시에 함께 붙인다**(SNI로 자동 선택된다). 기존 사이트는 전혀 영향받지 않는다.
+
+```powershell
+# 1) 서브도메인 전용 인증서 생성
+gcloud compute ssl-certificates create gymlog-cert `
+  --domains="$SUB.$DOMAIN" --global
+
+# 2) 프록시에 인증서 2장을 함께 지정 (기존 것 + 새 것)
+gcloud compute target-https-proxies update portfolio-https-proxy `
+  --ssl-certificates=portfolio-cert,gymlog-cert
+```
+
+⚠️ **2번 명령에서 `portfolio-cert` 를 빼먹으면 기존 도메인의 인증서가 떨어져 나간다.** 반드시 둘 다 나열할 것.
+
+발급 대기 (8-6과 동일, 보통 15분~1시간):
+
+```powershell
+while ($true) {
+  $st = gcloud compute ssl-certificates describe gymlog-cert --global --format="value(managed.status)"
+  Write-Host "$(Get-Date -Format 'HH:mm:ss')  $st"
+  if ($st -eq "ACTIVE") { Write-Host "발급 완료!" -ForegroundColor Green; break }
+  Start-Sleep -Seconds 30
+}
+```
+
+### E-9. GitHub Actions 워크플로우
+
+`gym-log` 리포지토리에도 Secret 2개(`GCP_SA_KEY`, `GCP_PROJECT_ID`)를 등록한다. **10번에서 만든 서비스 계정을 그대로 재사용**하면 되고, 권한을 새로 줄 필요는 없다.
+
+> 키 JSON이 이미 삭제됐다면 10-3의 `keys create` 로 새 키를 발급받아 등록하고, 마찬가지로 **즉시 로컬 파일을 지운다.**
+
+`.github/workflows/deploy.yml` 은 11-1과 거의 같고 **4곳만 다르다**:
+
+```yaml
+env:
+  GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  GCP_ZONE: asia-northeast3-a
+  ARTIFACT_REGISTRY: asia-northeast3-docker.pkg.dev
+  REPO_NAME: portfolio-docker          # 기존 저장소 재사용
+  IMAGE_NAME: gymlog                   # ① 이미지 이름만 다름
+  VM_NAME: portfolio-vm                # 같은 VM
+```
+
+배포 스텝의 컨테이너 이름과 포트만 바꾼다:
+
+```yaml
+              sudo docker pull $IMAGE_BASE:${{ github.sha }}
+              sudo docker stop gymlog || true      # ② 컨테이너 이름
+              sudo docker rm gymlog || true        # ③
+              sudo docker run -d --name gymlog --restart always \
+                -p 3001:3001 $IMAGE_BASE:${{ github.sha }}   # ④ 포트
+```
+
+검증 스텝도 `http://localhost:3001` 로 바꾼다.
+
+⚠️ **컨테이너 이름을 `portfolio` 로 두면 안 된다.** 배포할 때마다 포트폴리오 컨테이너를 지우고 자기가 그 자리를 차지해 버린다.
+
+커밋·푸시하면 자동 배포가 시작된다.
+
+### E-10. 검증
+
+```powershell
+# VM에 컨테이너 2개가 떠 있는지
+gcloud compute ssh portfolio-vm --zone=$ZONE --tunnel-through-iap --command="sudo docker ps"
+
+# 두 백엔드 모두 HEALTHY 인지
+gcloud compute backend-services get-health portfolio-backend --global
+gcloud compute backend-services get-health gymlog-backend --global
+
+# 두 도메인 모두 200 인지
+curl.exe -I "https://$DOMAIN"
+curl.exe -I "https://$SUB.$DOMAIN"
+```
+
+- [ ] `docker ps` 에 `portfolio`, `gymlog` **두 개**가 `Up`
+- [ ] 두 백엔드 모두 `HEALTHY`
+- [ ] `https://내도메인.com` 포트폴리오 정상 (**기존 사이트가 안 깨졌는지 반드시 확인**)
+- [ ] `https://gym.내도메인.com` gym-log 정상 + 자물쇠 아이콘
+
+### E-11. 주의사항
+
+**① 메모리 ⚠️ 가장 현실적인 위험**
+
+e2-small은 RAM 2GB다. Node 앱 두 개가 함께 돌면 빠듯할 수 있다.
+
+```powershell
+gcloud compute ssh portfolio-vm --zone=$ZONE --tunnel-through-iap --command="sudo docker stats --no-stream; free -h"
+```
+
+여유가 없으면 **e2-medium(4GB)** 으로 올린다. 월 비용이 약 $17 → $34로 늘어난다.
+
+```powershell
+gcloud compute instances stop portfolio-vm --zone=$ZONE
+gcloud compute instances set-machine-type portfolio-vm --zone=$ZONE --machine-type=e2-medium
+gcloud compute instances start portfolio-vm --zone=$ZONE
+```
+
+> VM을 껐다 켜도 두 컨테이너 모두 `--restart always` 라서 자동으로 다시 뜬다. 다만 재시작 동안 사이트가 잠시 끊긴다.
+
+**② 데이터 영속성 ⚠️ 운동 기록이 사라지지 않게**
+
+gym-log가 **컨테이너 안에** 데이터를 저장한다면(SQLite 파일 등), **배포할 때마다 컨테이너가 교체되면서 기록이 전부 날아간다.** 볼륨으로 호스트에 빼야 한다.
+
+```yaml
+              sudo mkdir -p /opt/gymlog/data
+              sudo docker run -d --name gymlog --restart always \
+                -p 3001:3001 \
+                -v /opt/gymlog/data:/app/data \
+                $IMAGE_BASE:${{ github.sha }}
+```
+
+앱의 DB 파일 경로도 `/app/data` 아래를 보도록 맞춘다. 규모가 커지면 Cloud SQL로 옮기는 것이 정석이지만, 개인 프로젝트 수준에서는 볼륨으로 충분하다.
+
+**③ 비용**
+
+VM·LB·IP를 공유하므로 **추가 비용은 사실상 없다.** 늘어나는 것은 Artifact Registry 이미지 용량(월 $0.1 내외)과, ①에서 사양을 올릴 경우의 VM 비용뿐이다.
+
+**④ 세 번째 앱을 더 올린다면**
+
+E-3~E-9를 포트만 바꿔(3002, 3003 …) 반복하면 된다. 다만 **앱이 3개를 넘어가면** e2-small로는 무리이고, 개별 스케일링·비용 관점에서 Cloud Run으로 옮기는 편이 낫다(13-5의 선택지 C).
